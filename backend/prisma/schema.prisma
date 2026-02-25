@@ -1,0 +1,655 @@
+// ============================================
+// schema.prisma — Database Design (All Tables)
+// Think of this like ALL your Laravel migrations combined in one file
+// Each "model" = one database table
+// Each field = one column in that table
+// ============================================
+
+// Prisma config — tells Prisma to use PostgreSQL
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ============================================
+// ENUMS — Like PHP Enums or Laravel constants
+// These restrict a column to specific values only
+// ============================================
+
+// User roles — who can do what
+// Like: 'role' column with allowed values
+enum UserRole {
+  USER        // Normal customer
+  ADMIN       // Full access admin
+  SUPER_ADMIN // Owner/developer
+}
+
+// Team member roles
+enum TeamRole {
+  OWNER   // Created the team, full control
+  ADMIN   // Can manage team settings
+  MEMBER  // Can run audits
+  VIEWER  // Can only view results
+}
+
+// Subscription plan tiers — which plan the user is on
+enum SubscriptionPlan {
+  FREE
+  STARTER
+  PRO
+  AGENCY
+}
+
+// Subscription payment status
+enum SubscriptionStatus {
+  ACTIVE        // Paying and active
+  PAST_DUE      // Payment failed, grace period
+  CANCELLED     // User cancelled
+  EXPIRED       // Subscription ended
+  TRIALING      // Free trial period
+}
+
+// Audit status — where is the audit in the pipeline
+enum AuditStatus {
+  QUEUED        // Waiting in line (BullMQ queue)
+  CRAWLING      // Currently crawling pages
+  ANALYZING     // Running all 9 modules
+  GENERATING    // Creating reports
+  COMPLETED     // Done! Results ready
+  FAILED        // Something went wrong
+  CANCELLED     // User stopped it
+}
+
+// How deep should we crawl the website
+enum AuditDepth {
+  SHALLOW   // Homepage + linked pages (25 pages)
+  MEDIUM    // 2 levels deep (100 pages)
+  DEEP      // 3+ levels deep (500+ pages)
+  FULL      // Entire site (up to plan limit)
+}
+
+// How serious is an SEO issue
+// Like: severity levels in error logging
+enum IssueSeverity {
+  CRITICAL  // Fix immediately — major ranking impact
+  HIGH      // Fix soon — significant impact
+  MEDIUM    // Should fix — moderate impact
+  LOW       // Nice to fix — minor impact
+  INFO      // Just information, no action needed
+}
+
+// Which module found the issue
+enum IssueCategory {
+  TECHNICAL       // Module 1: robots.txt, sitemaps, redirects
+  SPEED           // Module 2: page speed, core web vitals
+  CONTENT         // Module 3: duplicate content, headings
+  AI_INSIGHT      // Module 4: Claude AI analysis
+  SCHEMA          // Module 5: structured data
+  OFF_PAGE        // Module 6: backlinks
+  UX              // Module 7: user experience
+  COMPETITIVE     // Module 9: competitor analysis
+}
+
+// Mobile or Desktop audit
+enum DeviceType {
+  MOBILE
+  DESKTOP
+}
+
+// ============================================
+// USER & AUTH TABLES
+// Like: users, password_resets tables in Laravel
+// ============================================
+
+// Users table — every person who signs up
+// Like: User model in Laravel with Sanctum
+model User {
+  id            String    @id @default(uuid())  // UUID primary key (not auto-increment)
+  email         String    @unique               // Must be unique, used for login
+  password      String                          // Hashed with bcrypt (never store plain text)
+  firstName     String    @map("first_name")    // @map = column name in DB is "first_name"
+  lastName      String?   @map("last_name")     // ? means nullable (optional)
+  avatar        String?                         // Profile picture URL
+  role          UserRole  @default(USER)        // Default role is USER
+  isActive      Boolean   @default(true) @map("is_active")
+  isVerified    Boolean   @default(false) @map("is_verified") // Email verified?
+  twoFactorSecret String? @map("two_factor_secret")           // 2FA secret key
+  twoFactorEnabled Boolean @default(false) @map("two_factor_enabled")
+
+  // Timestamps — like $table->timestamps() in Laravel migration
+  createdAt     DateTime  @default(now()) @map("created_at")
+  updatedAt     DateTime  @updatedAt @map("updated_at")
+
+  // Relations — like hasMany() in Laravel Eloquent
+  // One user can have many refresh tokens, sites, audits, etc.
+  refreshTokens  RefreshToken[]
+  subscription   Subscription?    // ? = optional (user might be on free plan)
+  sites          Site[]
+  audits         Audit[]
+  teamMembers    TeamMember[]
+  ownedTeams     Team[]           // Teams this user created
+  activityLogs   ActivityLog[]
+  notifications  Notification[]
+  apiKeys        ApiKey[]
+
+  // @map = table name in database (snake_case convention)
+  @@map("users")
+}
+
+// Refresh tokens — for JWT token refresh flow
+// When access token expires (15min), use refresh token to get new one
+// Like: personal_access_tokens table in Laravel Sanctum
+model RefreshToken {
+  id          String   @id @default(uuid())
+  token       String   @unique                    // The actual refresh token string
+  userId      String   @map("user_id")
+  expiresAt   DateTime @map("expires_at")         // When this token expires
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  // Relation — this token belongs to a user
+  // Like: return $this->belongsTo(User::class)
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("refresh_tokens")
+}
+
+// ============================================
+// SUBSCRIPTION & BILLING TABLES
+// Like: Laravel Cashier subscriptions table
+// ============================================
+
+// Subscription — tracks which plan user is on
+model Subscription {
+  id                String             @id @default(uuid())
+  userId            String             @unique @map("user_id") // One subscription per user
+  plan              SubscriptionPlan   @default(FREE)
+  status            SubscriptionStatus @default(ACTIVE)
+  stripeCustomerId  String?            @map("stripe_customer_id")    // Stripe's customer ID
+  stripeSubscriptionId String?         @map("stripe_subscription_id") // Stripe's subscription ID
+  stripePriceId     String?            @map("stripe_price_id")
+
+  // Billing period
+  currentPeriodStart DateTime?  @map("current_period_start")
+  currentPeriodEnd   DateTime?  @map("current_period_end")
+  cancelledAt        DateTime?  @map("cancelled_at")
+
+  // Usage tracking — how much of their plan they've used this month
+  auditsUsed        Int        @default(0) @map("audits_used")     // Audits run this month
+  aiInsightsUsed    Int        @default(0) @map("ai_insights_used") // AI calls this month
+  apiCallsUsed      Int        @default(0) @map("api_calls_used")  // API calls this month
+
+  createdAt         DateTime   @default(now()) @map("created_at")
+  updatedAt         DateTime   @updatedAt @map("updated_at")
+
+  user              User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  usageRecords      UsageRecord[]
+
+  @@map("subscriptions")
+}
+
+// Usage records — detailed log of what the user consumed
+// Like: an audit trail for billing
+model UsageRecord {
+  id              String   @id @default(uuid())
+  subscriptionId  String   @map("subscription_id")
+  type            String                             // "audit", "ai_insight", "api_call"
+  count           Int      @default(1)               // How many units consumed
+  metadata        Json?                              // Extra info (which audit, which API)
+  recordedAt      DateTime @default(now()) @map("recorded_at")
+
+  subscription    Subscription @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
+
+  @@map("usage_records")
+}
+
+// Coupons — discount codes for subscriptions
+model Coupon {
+  id              String    @id @default(uuid())
+  code            String    @unique                // e.g., "LAUNCH50" for 50% off
+  discountPercent Int       @map("discount_percent") // 10, 20, 50 etc.
+  maxUses         Int?      @map("max_uses")       // null = unlimited
+  currentUses     Int       @default(0) @map("current_uses")
+  expiresAt       DateTime? @map("expires_at")
+  isActive        Boolean   @default(true) @map("is_active")
+  createdAt       DateTime  @default(now()) @map("created_at")
+
+  @@map("coupons")
+}
+
+// ============================================
+// TEAM TABLES
+// For Agency plan — multiple users per account
+// ============================================
+
+// Team — a group of users working together
+model Team {
+  id          String       @id @default(uuid())
+  name        String                              // "iMark SEO Team"
+  ownerId     String       @map("owner_id")
+  createdAt   DateTime     @default(now()) @map("created_at")
+  updatedAt   DateTime     @updatedAt @map("updated_at")
+
+  owner       User         @relation(fields: [ownerId], references: [id])
+  members     TeamMember[]
+  sites       Site[]       // Sites shared with this team
+
+  @@map("teams")
+}
+
+// Team members — who belongs to which team and their role
+// Like: a pivot table team_user in Laravel
+model TeamMember {
+  id        String    @id @default(uuid())
+  teamId    String    @map("team_id")
+  userId    String    @map("user_id")
+  role      TeamRole  @default(MEMBER)
+  joinedAt  DateTime  @default(now()) @map("joined_at")
+
+  team      Team      @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // One user can only be in a team once
+  @@unique([teamId, userId])
+  @@map("team_members")
+}
+
+// ============================================
+// SITE & AUDIT TABLES
+// The core of our SEO tool
+// ============================================
+
+// Site — a website that the user wants to audit
+// Like: a "project" in your Agency Dashboard
+model Site {
+  id          String    @id @default(uuid())
+  userId      String    @map("user_id")           // Who owns this site
+  teamId      String?   @map("team_id")           // Optional — shared with team
+  url         String                               // "https://example.com"
+  name        String                               // "My Client Site"
+  favicon     String?                              // Site icon URL
+  isActive    Boolean   @default(true) @map("is_active")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  team        Team?     @relation(fields: [teamId], references: [id])
+  competitors Competitor[]
+  audits      Audit[]
+  schedules   AuditSchedule[]
+
+  @@map("sites")
+}
+
+// Competitor — competitor websites to compare against
+// Module 9 uses these for competitive analysis
+model Competitor {
+  id        String   @id @default(uuid())
+  siteId    String   @map("site_id")              // Which site is this competitor for
+  url       String                                 // "https://competitor.com"
+  name      String                                 // "Main Competitor"
+  createdAt DateTime @default(now()) @map("created_at")
+
+  site      Site     @relation(fields: [siteId], references: [id], onDelete: Cascade)
+
+  @@map("competitors")
+}
+
+// Audit schedule — for recurring automatic audits
+// Like: Laravel Task Scheduling (cron jobs)
+model AuditSchedule {
+  id          String    @id @default(uuid())
+  siteId      String    @map("site_id")
+  frequency   String                               // "daily", "weekly", "monthly"
+  depth       AuditDepth @default(MEDIUM)
+  nextRunAt   DateTime  @map("next_run_at")        // When to run next
+  isActive    Boolean   @default(true) @map("is_active")
+  createdAt   DateTime  @default(now()) @map("created_at")
+
+  site        Site      @relation(fields: [siteId], references: [id], onDelete: Cascade)
+
+  @@map("audit_schedules")
+}
+
+// ============================================
+// AUDIT — The Main Audit Record
+// This is created when user clicks "Run Audit"
+// ============================================
+
+model Audit {
+  id              String      @id @default(uuid())
+  siteId          String      @map("site_id")
+  userId          String      @map("user_id")
+  status          AuditStatus @default(QUEUED)
+  depth           AuditDepth  @default(MEDIUM)
+
+  // Overall scores (0-100) — calculated after all modules finish
+  overallScore    Float?      @map("overall_score")     // Combined score
+  technicalScore  Float?      @map("technical_score")   // Module 1
+  speedScore      Float?      @map("speed_score")       // Module 2
+  contentScore    Float?      @map("content_score")     // Module 3
+  aiScore         Float?      @map("ai_score")          // Module 4
+  schemaScore     Float?      @map("schema_score")      // Module 5
+  offPageScore    Float?      @map("off_page_score")    // Module 6
+  uxScore         Float?      @map("ux_score")          // Module 7
+  competitiveScore Float?     @map("competitive_score") // Module 9
+
+  // Crawl stats
+  totalPages      Int         @default(0) @map("total_pages")      // Pages found
+  crawledPages    Int         @default(0) @map("crawled_pages")    // Pages crawled
+  totalIssues     Int         @default(0) @map("total_issues")     // Issues found
+  criticalIssues  Int         @default(0) @map("critical_issues")  // Critical count
+  highIssues      Int         @default(0) @map("high_issues")      // High count
+
+  // Config — what modules to run, what to skip
+  config          Json?                               // {"skipModules": ["off_page"], "device": "mobile"}
+
+  // Timing
+  startedAt       DateTime?   @map("started_at")
+  completedAt     DateTime?   @map("completed_at")
+  duration        Int?                                // Total seconds taken
+  createdAt       DateTime    @default(now()) @map("created_at")
+  updatedAt       DateTime    @updatedAt @map("updated_at")
+
+  // Relations
+  site            Site        @relation(fields: [siteId], references: [id], onDelete: Cascade)
+  user            User        @relation(fields: [userId], references: [id])
+  crawledPageData CrawledPage[]
+  issues          AuditIssue[]
+  speedResults    SpeedResult[]
+  schemaResults   SchemaResult[]
+  aiInsights      AiInsight[]
+  backlinkData    BacklinkData?
+  reports         AuditReport[]
+
+  @@map("audits")
+}
+
+// ============================================
+// CRAWLED PAGES — Every page the crawler visits
+// The crawler (Module 0) fills this table
+// ============================================
+
+model CrawledPage {
+  id              String    @id @default(uuid())
+  auditId         String    @map("audit_id")
+  url             String                            // Full URL of the page
+  statusCode      Int       @map("status_code")     // 200, 301, 404, 500 etc.
+  title           String?                           // <title> tag content
+  metaDescription String?   @map("meta_description") // <meta description> content
+  h1              String?                           // First <h1> tag
+  canonicalUrl    String?   @map("canonical_url")   // <link rel="canonical">
+  contentLength   Int?      @map("content_length")  // Page size in bytes
+  wordCount       Int?      @map("word_count")      // Number of words on page
+  loadTime        Float?    @map("load_time")       // Page load time in ms
+  depth           Int       @default(0)             // How many clicks from homepage
+  isIndexable     Boolean   @default(true) @map("is_indexable") // Can Google index this?
+
+  // Internal/external link counts on this page
+  internalLinks   Int       @default(0) @map("internal_links")
+  externalLinks   Int       @default(0) @map("external_links")
+  brokenLinks     Int       @default(0) @map("broken_links")
+
+  // Image stats
+  totalImages     Int       @default(0) @map("total_images")
+  missingAlt      Int       @default(0) @map("missing_alt")  // Images without alt text
+
+  // Headers found on this page (stored as JSON)
+  headings        Json?                             // {"h1": ["Title"], "h2": ["Sub1", "Sub2"]}
+
+  crawledAt       DateTime  @default(now()) @map("crawled_at")
+
+  audit           Audit     @relation(fields: [auditId], references: [id], onDelete: Cascade)
+  redirects       Redirect[]
+
+  @@map("crawled_pages")
+}
+
+// Redirect chain tracking — follows 301/302 redirects
+// Like: A → B → C (too many redirects = SEO problem)
+model Redirect {
+  id              String   @id @default(uuid())
+  crawledPageId   String   @map("crawled_page_id")
+  fromUrl         String   @map("from_url")        // Where it redirects FROM
+  toUrl           String   @map("to_url")          // Where it redirects TO
+  statusCode      Int      @map("status_code")     // 301 (permanent) or 302 (temporary)
+  position        Int                               // Order in chain (1, 2, 3...)
+
+  crawledPage     CrawledPage @relation(fields: [crawledPageId], references: [id], onDelete: Cascade)
+
+  @@map("redirects")
+}
+
+// ============================================
+// MODULE 2: PAGE SPEED RESULTS
+// Data from Google PageSpeed API
+// ============================================
+
+model SpeedResult {
+  id              String     @id @default(uuid())
+  auditId         String     @map("audit_id")
+  url             String                            // Which page was tested
+  device          DeviceType                        // MOBILE or DESKTOP
+
+  // Core Web Vitals — the main speed metrics Google uses for ranking
+  performanceScore Float?    @map("performance_score") // 0-100
+  lcp             Float?                            // Largest Contentful Paint (seconds)
+  fid             Float?                            // First Input Delay (milliseconds)
+  cls             Float?                            // Cumulative Layout Shift (score)
+  fcp             Float?                            // First Contentful Paint (seconds)
+  ttfb            Float?                            // Time to First Byte (seconds)
+  si              Float?                            // Speed Index (seconds)
+  tbt             Float?                            // Total Blocking Time (ms)
+  tti             Float?                            // Time to Interactive (seconds)
+
+  // Resource breakdown
+  totalSize       Int?       @map("total_size")     // Total page size in bytes
+  htmlSize        Int?       @map("html_size")
+  cssSize         Int?       @map("css_size")
+  jsSize          Int?       @map("js_size")
+  imageSize       Int?       @map("image_size")
+  fontSize        Int?       @map("font_size")
+
+  // Opportunities (what to improve)
+  opportunities   Json?                             // Array of improvement suggestions
+  diagnostics     Json?                             // Detailed diagnostic data
+
+  testedAt        DateTime   @default(now()) @map("tested_at")
+
+  audit           Audit      @relation(fields: [auditId], references: [id], onDelete: Cascade)
+
+  @@map("speed_results")
+}
+
+// ============================================
+// MODULE 5: SCHEMA/STRUCTURED DATA RESULTS
+// Checks JSON-LD, Microdata on pages
+// ============================================
+
+model SchemaResult {
+  id              String   @id @default(uuid())
+  auditId         String   @map("audit_id")
+  url             String                            // Which page
+  schemaType      String   @map("schema_type")      // "Article", "Product", "FAQ", etc.
+  isValid         Boolean  @map("is_valid")          // Does it pass validation?
+  errors          Json?                              // Validation errors
+  warnings        Json?                              // Validation warnings
+  rawSchema       Json?    @map("raw_schema")        // The actual JSON-LD/Microdata found
+  richResultType  String?  @map("rich_result_type")  // "FAQ", "Review", "Recipe" etc.
+  isEligible      Boolean  @default(false) @map("is_eligible") // Eligible for rich results?
+
+  audit           Audit    @relation(fields: [auditId], references: [id], onDelete: Cascade)
+
+  @@map("schema_results")
+}
+
+// ============================================
+// MODULE 4: AI INSIGHTS (Claude API)
+// Our signature "Why Not Ranking" feature
+// ============================================
+
+model AiInsight {
+  id              String   @id @default(uuid())
+  auditId         String   @map("audit_id")
+  url             String?                           // Specific page (null = site-wide insight)
+  type            String                            // "content_score", "intent_mismatch", "topic_gap", "why_not_ranking"
+  title           String                            // "Your content doesn't match search intent"
+  description     String                            // Detailed explanation from Claude
+  score           Float?                            // 0-100 content quality score
+  recommendations Json?                             // Array of actionable suggestions
+  tokensUsed      Int      @default(0) @map("tokens_used") // Track API cost
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  audit           Audit    @relation(fields: [auditId], references: [id], onDelete: Cascade)
+
+  @@map("ai_insights")
+}
+
+// ============================================
+// MODULE 6: BACKLINK DATA (DataForSEO API)
+// Off-page SEO analysis
+// ============================================
+
+model BacklinkData {
+  id                  String   @id @default(uuid())
+  auditId             String   @unique @map("audit_id") // One backlink report per audit
+  totalBacklinks      Int      @default(0) @map("total_backlinks")
+  referringDomains    Int      @default(0) @map("referring_domains")
+  domainAuthority     Float?   @map("domain_authority")     // 0-100
+  toxicLinks          Int      @default(0) @map("toxic_links")
+  dofollowLinks       Int      @default(0) @map("dofollow_links")
+  nofollowLinks       Int      @default(0) @map("nofollow_links")
+
+  // Detailed backlink list stored as JSON (can be very large)
+  topBacklinks        Json?    @map("top_backlinks")         // Top 100 backlinks
+  anchorTextDistribution Json? @map("anchor_text_distribution") // {"brand": 40, "keyword": 30}
+  referringDomainsList Json?   @map("referring_domains_list") // Top referring domains
+
+  fetchedAt           DateTime @default(now()) @map("fetched_at")
+
+  audit               Audit    @relation(fields: [auditId], references: [id], onDelete: Cascade)
+
+  @@map("backlink_data")
+}
+
+// ============================================
+// AUDIT ISSUES — All problems found by ALL modules
+// Every module writes issues to this ONE table
+// Like: a central error log
+// ============================================
+
+model AuditIssue {
+  id              String        @id @default(uuid())
+  auditId         String        @map("audit_id")
+  category        IssueCategory                     // Which module found this
+  severity        IssueSeverity                     // How bad is it
+  title           String                            // "Missing meta description"
+  description     String                            // "Page /about has no meta description"
+  url             String?                           // Which page (null = site-wide)
+  recommendation  String?                           // "Add a meta description between 150-160 characters"
+  metadata        Json?                             // Extra data specific to the issue
+  isFixed         Boolean       @default(false) @map("is_fixed") // For before/after comparison
+  createdAt       DateTime      @default(now()) @map("created_at")
+
+  audit           Audit         @relation(fields: [auditId], references: [id], onDelete: Cascade)
+
+  // Index for fast filtering by category and severity
+  @@index([auditId, category])
+  @@index([auditId, severity])
+  @@map("audit_issues")
+}
+
+// ============================================
+// MODULE 8: REPORTS
+// PDF reports, CSV exports, shareable links
+// ============================================
+
+model AuditReport {
+  id              String    @id @default(uuid())
+  auditId         String    @map("audit_id")
+  type            String                            // "pdf", "csv", "html"
+  fileName        String    @map("file_name")       // "audit-report-2026-01-15.pdf"
+  fileUrl         String    @map("file_url")        // URL to download
+  fileSize        Int?      @map("file_size")       // Size in bytes
+
+  // Shareable link feature
+  shareToken      String?   @unique @map("share_token") // Random token for public link
+  shareExpiresAt  DateTime? @map("share_expires_at")
+  isPublic        Boolean   @default(false) @map("is_public") // Anyone with link can view
+
+  // White-label settings (Pro/Agency plans)
+  brandName       String?   @map("brand_name")      // Custom company name
+  brandLogo       String?   @map("brand_logo")      // Custom logo URL
+  brandColor      String?   @map("brand_color")     // Custom color "#FF5733"
+
+  createdAt       DateTime  @default(now()) @map("created_at")
+
+  audit           Audit     @relation(fields: [auditId], references: [id], onDelete: Cascade)
+
+  @@map("audit_reports")
+}
+
+// ============================================
+// API KEYS — For users who access our API (Pro/Agency)
+// Like: Laravel Passport or Sanctum API tokens
+// ============================================
+
+model ApiKey {
+  id          String    @id @default(uuid())
+  userId      String    @map("user_id")
+  name        String                                // "My Integration Key"
+  key         String    @unique                     // The actual API key (hashed)
+  lastUsedAt  DateTime? @map("last_used_at")
+  expiresAt   DateTime? @map("expires_at")
+  isActive    Boolean   @default(true) @map("is_active")
+  createdAt   DateTime  @default(now()) @map("created_at")
+
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("api_keys")
+}
+
+// ============================================
+// ACTIVITY LOG — Track everything users do
+// Like: Laravel Activity Log (spatie/laravel-activitylog)
+// ============================================
+
+model ActivityLog {
+  id          String   @id @default(uuid())
+  userId      String   @map("user_id")
+  action      String                                // "audit.started", "site.created", "login"
+  resource    String?                               // "audit", "site", "user"
+  resourceId  String?  @map("resource_id")          // ID of the resource
+  metadata    Json?                                 // Extra context
+  ipAddress   String?  @map("ip_address")
+  userAgent   String?  @map("user_agent")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, action])
+  @@map("activity_logs")
+}
+
+// ============================================
+// NOTIFICATIONS — In-app + email notifications
+// ============================================
+
+model Notification {
+  id          String    @id @default(uuid())
+  userId      String    @map("user_id")
+  type        String                                // "audit_complete", "payment_failed", "team_invite"
+  title       String                                // "Audit Complete!"
+  message     String                                // "Your audit for example.com is ready"
+  link        String?                               // URL to navigate to
+  isRead      Boolean   @default(false) @map("is_read")
+  readAt      DateTime? @map("read_at")
+  createdAt   DateTime  @default(now()) @map("created_at")
+
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, isRead])
+  @@map("notifications")
+}
