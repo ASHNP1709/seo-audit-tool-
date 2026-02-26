@@ -50,7 +50,8 @@ export default function RegisterPage() {
       setCheckingAuth(false);
     };
     checkAuth();
-  }, [router]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const handleRegister = async (e: React.FormEvent) => {
     e.preventDefault();

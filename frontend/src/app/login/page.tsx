@@ -45,7 +45,8 @@ export default function LoginPage() {
       setCheckingAuth(false);
     };
     checkAuth();
-  }, [router]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();

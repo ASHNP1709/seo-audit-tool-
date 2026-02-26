@@ -5,29 +5,23 @@
 // This page:
 // 1. Checks if user is logged in (has JWT token in cookie)
 // 2. Calls GET /api/auth/me to get user profile from backend
-// 3. Shows user info + subscription plan + stats cards
-// 4. If not logged in -> redirect to /login
-//
-// This is a protected page - only logged-in users can see it
-// Like: Route::middleware('auth')->get('/dashboard', ...)
+// 3. Calls GET /api/sites to get sites count
+// 4. Shows user info + subscription plan + stats cards
+// 5. If not logged in -> redirect to /login
 // ==============================================
 'use client';
 
-// useEffect = runs code when page loads (like mounted() in Vue)
-// Like: public function __construct() or boot() in Laravel
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
+import Link from 'next/link';
 import Cookies from 'js-cookie';
 import api from '@/lib/api';
 
-// TypeScript interface = defines the shape of user data
-// Like: a PHP class or Laravel API Resource
-// This tells TypeScript exactly what fields the user object has
 interface User {
   id: string;
   email: string;
   firstName: string;
-  lastName: string | null;  // null = field can be empty
+  lastName: string | null;
   role: string;
   avatar: string | null;
   isVerified: boolean;
@@ -37,63 +31,51 @@ interface User {
     plan: string;
     status: string;
     auditsUsed: number;
-  } | null;  // null = user might not have subscription
+  } | null;
 }
 
 export default function DashboardPage() {
-  // User state - starts as null (not loaded yet)
   const [user, setUser] = useState<User | null>(null);
-  // Loading state - shows spinner while fetching
+  const [sitesCount, setSitesCount] = useState(0);
   const [loading, setLoading] = useState(true);
   const router = useRouter();
 
-  // useEffect with [] = runs ONCE when page loads
-  // Like: mounted() { this.fetchUser() } in Vue
-  // Like: public function index() { $user = auth()->user(); } in Laravel
   useEffect(() => {
-    const fetchProfile = async () => {
-      // Check if token exists in cookies
+    const fetchData = async () => {
       const token = Cookies.get('accessToken');
-
       if (!token) {
-        // No token = not logged in -> redirect to login
-        // Like: if (!Auth::check()) return redirect('/login')
         router.push('/login');
         return;
       }
 
       try {
-        // Call our NestJS backend: GET /api/auth/me
-        // The JWT token is automatically attached by our api interceptor (lib/api.ts)
-        // Like: $user = auth()->user() in Laravel
-        const response = await api.get('/auth/me');
-        // Save user data in state - triggers re-render with user info
-        setUser(response.data);
+        // Fetch user profile AND sites count in parallel
+        // Like: [$user, $sites] = [auth()->user(), auth()->user()->sites()->count()]
+        const [userResponse, sitesResponse] = await Promise.all([
+          api.get('/auth/me'),
+          api.get('/sites'),
+        ]);
+        setUser(userResponse.data);
+        setSitesCount(sitesResponse.data.length);
       } catch {
-        // Token invalid or expired -> clear cookies and redirect to login
         Cookies.remove('accessToken');
         Cookies.remove('refreshToken');
         router.push('/login');
       } finally {
-        // Stop loading spinner
         setLoading(false);
       }
     };
 
-    fetchProfile();
-  }, [router]);
-  // [router] = dependency array - re-runs if router changes (rarely)
+    fetchData();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
-  // Logout function - clears tokens and redirects to login
-  // Like: Auth::logout() in Laravel
   const handleLogout = () => {
     Cookies.remove('accessToken');
     Cookies.remove('refreshToken');
     router.push('/login');
   };
 
-  // Show loading spinner while fetching user data
-  // Like: @if($loading) <div>Loading...</div> @endif in Blade
   if (loading) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-gray-50">
@@ -105,23 +87,30 @@ export default function DashboardPage() {
     );
   }
 
-  // Safety check - if no user data somehow
   if (!user) return null;
 
-  // Dashboard UI - only shows when user is loaded
   return (
     <div className="min-h-screen bg-gray-50">
 
       {/* Top Navigation Bar */}
-      {/* Like: @include('partials.navbar') in Blade */}
       <nav className="bg-white shadow-sm border-b">
         <div className="max-w-7xl mx-auto px-4 py-4 flex justify-between items-center">
           <h1 className="text-xl font-bold text-gray-900">SEO Audit Tool</h1>
           <div className="flex items-center gap-4">
-            <span className="text-gray-600">Welcome, <strong>{user.firstName}</strong></span>
-            {/* onClick = when button is clicked, call handleLogout */}
-            {/* Like: <form method="POST" action="/logout"> in Blade */}
-            <button onClick={handleLogout} className="bg-gray-100 text-gray-700 px-4 py-2 rounded-lg hover:bg-gray-200 transition">Logout</button>
+            {/* Navigation Links */}
+            <Link href="/dashboard" className="text-blue-600 font-semibold">
+              Dashboard
+            </Link>
+            <Link href="/dashboard/sites" className="text-gray-600 hover:text-gray-900 transition">
+              My Sites
+            </Link>
+            <span className="text-gray-300">|</span>
+            <span className="text-gray-600">
+              Welcome, <strong>{user.firstName}</strong>
+            </span>
+            <button onClick={handleLogout} className="bg-gray-100 text-gray-700 px-4 py-2 rounded-lg hover:bg-gray-200 transition">
+              Logout
+            </button>
           </div>
         </div>
       </nav>
@@ -135,22 +124,22 @@ export default function DashboardPage() {
           <p className="text-gray-500 mt-1">Here is your SEO audit dashboard</p>
         </div>
 
-        {/* Stats Cards - 4 cards in a responsive grid */}
-        {/* grid-cols-1 = 1 column on mobile */}
-        {/* md:grid-cols-2 = 2 columns on tablet */}
-        {/* lg:grid-cols-4 = 4 columns on desktop */}
-        {/* Like: @foreach($stats as $stat) <div class="card"> in Blade */}
+        {/* Stats Cards - 4 cards */}
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
 
           {/* Plan Card */}
           <div className="bg-white rounded-xl shadow-sm p-6 border">
             <p className="text-sm text-gray-500">Current Plan</p>
-            {/* ?. = optional chaining - if subscription is null, returns undefined */}
-            {/* || 'FREE' = fallback value if undefined */}
-            {/* Like: $user->subscription->plan ?? 'FREE' in PHP */}
             <p className="text-2xl font-bold text-blue-600 mt-1">{user.subscription?.plan || 'FREE'}</p>
             <p className="text-xs text-gray-400 mt-1">{user.subscription?.status || 'ACTIVE'}</p>
           </div>
+
+          {/* Websites Added Card — NEW! Links to sites page */}
+          <Link href="/dashboard/sites" className="bg-white rounded-xl shadow-sm p-6 border hover:shadow-md transition">
+            <p className="text-sm text-gray-500">Websites Added</p>
+            <p className="text-2xl font-bold text-purple-600 mt-1">{sitesCount}</p>
+            <p className="text-xs text-blue-500 mt-1">Click to manage sites</p>
+          </Link>
 
           {/* Audits Used Card */}
           <div className="bg-white rounded-xl shadow-sm p-6 border">
@@ -164,15 +153,6 @@ export default function DashboardPage() {
             <p className="text-sm text-gray-500">Account Status</p>
             <p className="text-2xl font-bold text-green-600 mt-1">Active</p>
             <p className="text-xs text-gray-400 mt-1">Email {user.isVerified ? 'Verified' : 'Not verified'}</p>
-          </div>
-
-          {/* Role Card */}
-          <div className="bg-white rounded-xl shadow-sm p-6 border">
-            <p className="text-sm text-gray-500">Role</p>
-            <p className="text-2xl font-bold text-gray-900 mt-1">{user.role}</p>
-            {/* new Date().toLocaleDateString() = formats date nicely */}
-            {/* Like: Carbon::parse($date)->format('M d, Y') in Laravel */}
-            <p className="text-xs text-gray-400 mt-1">Member since {new Date(user.createdAt).toLocaleDateString()}</p>
           </div>
         </div>
 
@@ -199,21 +179,28 @@ export default function DashboardPage() {
           </div>
         </div>
 
-        {/* Quick Actions - buttons for future features */}
-        {/* These will be connected to actual functionality later */}
+        {/* Quick Actions — NOW WITH WORKING LINKS */}
         <div className="bg-white rounded-xl shadow-sm p-6 border">
           <h3 className="text-lg font-semibold text-gray-900 mb-4">Quick Actions</h3>
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            <button className="bg-blue-50 text-blue-700 p-4 rounded-lg text-left hover:bg-blue-100 transition">
-              <p className="font-semibold">Run New Audit</p>
-              <p className="text-sm text-blue-500 mt-1">Coming soon</p>
-            </button>
+            {/* Add Website — links to sites page */}
+            <Link
+              href="/dashboard/sites"
+              className="bg-blue-50 text-blue-700 p-4 rounded-lg text-left hover:bg-blue-100 transition block"
+            >
+              <p className="font-semibold">+ Add Website</p>
+              <p className="text-sm text-blue-500 mt-1">{sitesCount} sites added</p>
+            </Link>
+
+            {/* Run Audit — coming soon */}
             <button className="bg-green-50 text-green-700 p-4 rounded-lg text-left hover:bg-green-100 transition">
-              <p className="font-semibold">View Reports</p>
+              <p className="font-semibold">Run New Audit</p>
               <p className="text-sm text-green-500 mt-1">Coming soon</p>
             </button>
+
+            {/* View Reports — coming soon */}
             <button className="bg-purple-50 text-purple-700 p-4 rounded-lg text-left hover:bg-purple-100 transition">
-              <p className="font-semibold">Settings</p>
+              <p className="font-semibold">View Reports</p>
               <p className="text-sm text-purple-500 mt-1">Coming soon</p>
             </button>
           </div>
